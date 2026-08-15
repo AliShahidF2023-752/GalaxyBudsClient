@@ -14,5 +14,7 @@
   <string></string>
   <key>LSRequiresIPhoneOS</key>
   <true/>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Galaxy Buds Manager uses Bluetooth to discover and communicate with your Galaxy Buds.</string>
 </dict>
 </plist>
