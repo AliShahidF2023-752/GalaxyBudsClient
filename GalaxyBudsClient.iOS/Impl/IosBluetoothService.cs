@@ -29,6 +29,12 @@ public class IosBluetoothService : IBluetoothService
     private CBCharacteristic? _notifyCharacteristic;
     private CBUUID? _targetServiceUuid;
 
+    // Classic Bluetooth (BR/EDR) support
+    private CBL2CAPChannel? _l2capChannel;
+    private NSInputStream? _inputStream;
+    private NSOutputStream? _outputStream;
+    private readonly byte[] _readBuffer = new byte[4096];
+
     private TaskCompletionSource<bool>? _connectTcs;
     private TaskCompletionSource<bool>? _readyTcs;
 
@@ -57,6 +63,9 @@ public class IosBluetoothService : IBluetoothService
         _targetServiceUuid = CBUUID.FromString(serviceUuid);
         _writeCharacteristic = null;
         _notifyCharacteristic = null;
+        _l2capChannel = null;
+        _inputStream = null;
+        _outputStream = null;
 
         var peripheral = ResolvePeripheral(macAddress);
         if (peripheral == null)
@@ -81,6 +90,7 @@ public class IosBluetoothService : IBluetoothService
                 {
                     _central.CancelPeripheralConnection(_activePeripheral);
                 }
+                CloseL2CapChannel();
             }
             catch
             {
@@ -90,11 +100,81 @@ public class IosBluetoothService : IBluetoothService
             _readyTcs?.TrySetCanceled(cancelToken);
         });
 
-        _central.ConnectPeripheral(_activePeripheral);
-        await _connectTcs.Task;
+        // Try to connect as classic Bluetooth (BR/EDR) first for Galaxy Buds
+        // Galaxy Buds use SPP/RFCOMM which is exposed via L2CAP on iOS 17+
+        if (IsClassicBluetoothService(serviceUuid))
+        {
+            await ConnectClassicBluetoothAsync(cancelToken);
+        }
+        else
+        {
+            // Fall back to GATT/LE connection
+            _central.ConnectPeripheral(_activePeripheral);
+            await _connectTcs.Task;
 
-        _activePeripheral.DiscoverServices([_targetServiceUuid]);
-        await _readyTcs.Task;
+            _activePeripheral.DiscoverServices([_targetServiceUuid]);
+            await _readyTcs.Task;
+        }
+    }
+
+    private bool IsClassicBluetoothService(string serviceUuid)
+    {
+        // Check if the service UUID is a classic Bluetooth SPP UUID
+        var classicUuids = new[]
+        {
+            "00001101-0000-1000-8000-00805F9B34FB", // SPP Standard
+            "00001102-0000-1000-8000-00805F9B34FD", // SPP Legacy
+            "F8620674-A1ED-41AB-A8B9-DE9AD655729D", // SMEP SPP
+            "2E73A4AD-332D-41FC-90E2-16BEF06523F2", // SPP New
+        };
+        return classicUuids.Any(u => u.Equals(serviceUuid, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task ConnectClassicBluetoothAsync(CancellationToken cancelToken)
+    {
+        if (_activePeripheral == null)
+        {
+            throw new BluetoothException(BluetoothException.ErrorCodes.ConnectFailed, "No active peripheral");
+        }
+
+        try
+        {
+            // For classic Bluetooth on iOS 17+, we use OpenL2CAPChannel
+            // The PSM (Protocol/Service Multiplexer) for RFCOMM is typically 0x0003 (3)
+            // but we need to discover the correct PSM via SDP
+            // For now, use the standard RFCOMM PSM
+            var psm = new NSNumber(3); // RFCOMM PSM
+            
+            _connectTcs = NewSignal();
+            
+            _activePeripheral.OpenL2CAPChannel(psm);
+            await _connectTcs.Task;
+        }
+        catch (Exception ex)
+        {
+            throw new BluetoothException(BluetoothException.ErrorCodes.ConnectFailed,
+                $"Failed to open classic Bluetooth L2CAP channel: {ex.Message}");
+        }
+    }
+
+    private void CloseL2CapChannel()
+    {
+        try
+        {
+            _inputStream?.Close();
+            _outputStream?.Close();
+            _l2capChannel?.Close();
+        }
+        catch
+        {
+            // ignored
+        }
+        finally
+        {
+            _inputStream = null;
+            _outputStream = null;
+            _l2capChannel = null;
+        }
     }
 
     public async Task DisconnectAsync()
@@ -103,6 +183,8 @@ public class IosBluetoothService : IBluetoothService
         {
             _central.CancelPeripheralConnection(_activePeripheral);
         }
+        
+        CloseL2CapChannel();
 
         IsStreamConnected = false;
         await Task.CompletedTask;
@@ -110,16 +192,32 @@ public class IosBluetoothService : IBluetoothService
 
     public async Task SendAsync(byte[] data)
     {
-        if (!IsStreamConnected || _activePeripheral == null || _writeCharacteristic == null)
+        if (!IsStreamConnected)
         {
             return;
         }
 
-        var type = _writeCharacteristic.Properties.HasFlag(CBCharacteristicProperties.Write)
-            ? CBCharacteristicWriteType.WithResponse
-            : CBCharacteristicWriteType.WithoutResponse;
+        if (_l2capChannel != null && _outputStream != null)
+        {
+            // Classic Bluetooth L2CAP channel
+            var nsData = NSData.FromArray(data);
+            var bytesWritten = _outputStream.Write(nsData.Bytes, (nuint)data.Length);
+            if (bytesWritten != data.Length)
+            {
+                throw new BluetoothException(BluetoothException.ErrorCodes.SendFailed,
+                    $"Failed to write all data to L2CAP channel. Written: {bytesWritten}/{data.Length}");
+            }
+        }
+        else if (_activePeripheral != null && _writeCharacteristic != null)
+        {
+            // GATT/LE connection
+            var type = _writeCharacteristic.Properties.HasFlag(CBCharacteristicProperties.Write)
+                ? CBCharacteristicWriteType.WithResponse
+                : CBCharacteristicWriteType.WithoutResponse;
 
-        _activePeripheral.WriteValue(NSData.FromArray(data), _writeCharacteristic, type);
+            _activePeripheral.WriteValue(NSData.FromArray(data), _writeCharacteristic, type);
+        }
+
         await Task.CompletedTask;
     }
 
@@ -128,7 +226,16 @@ public class IosBluetoothService : IBluetoothService
         await EnsureBluetoothReadyAsync(CancellationToken.None);
 
         _devices.Clear();
-        _central.ScanForPeripherals((CBUUID[]?)null);
+        
+        // Scan for both LE and classic Bluetooth devices
+        // For classic Bluetooth, we scan with the SPP service UUIDs
+        var sppUuids = new[]
+        {
+            CBUUID.FromString("00001101-0000-1000-8000-00805F9B34FB"), // SPP Standard
+            CBUUID.FromString("00001102-0000-1000-8000-00805F9B34FD"), // SPP Legacy
+        };
+        
+        _central.ScanForPeripherals(sppUuids);
 
         await Task.Delay(5000);
 
@@ -274,6 +381,7 @@ public class IosBluetoothService : IBluetoothService
         IsStreamConnected = false;
         _writeCharacteristic = null;
         _notifyCharacteristic = null;
+        CloseL2CapChannel();
         _readyTcs?.TrySetCanceled();
         Disconnected?.Invoke(this, error?.LocalizedDescription ?? "Disconnected");
     }
@@ -355,6 +463,73 @@ public class IosBluetoothService : IBluetoothService
         }
     }
 
+    // Classic Bluetooth L2CAP channel delegates
+    private void OnL2CapChannelOpened(CBL2CAPChannel channel, NSError? error)
+    {
+        if (error != null)
+        {
+            var ex = new BluetoothException(BluetoothException.ErrorCodes.ConnectFailed,
+                $"Failed to open L2CAP channel: {error.LocalizedDescription}");
+            BluetoothErrorAsync?.Invoke(this, ex);
+            _connectTcs?.TrySetException(ex);
+            return;
+        }
+
+        _l2capChannel = channel;
+        _l2capChannel.Delegate = new L2CapChannelDelegate(this);
+
+        // Open input and output streams
+        _l2capChannel.GetStreams(out _inputStream, out _outputStream);
+        
+        if (_inputStream != null && _outputStream != null)
+        {
+            _inputStream.Delegate = new StreamDelegate(this, true);
+            _outputStream.Delegate = new StreamDelegate(this, false);
+            
+            _inputStream.ScheduleInRunLoop(NSRunLoop.Current, NSRunLoopMode.Default);
+            _outputStream.ScheduleInRunLoop(NSRunLoop.Current, NSRunLoopMode.Default);
+            
+            _inputStream.Open();
+            _outputStream.Open();
+            
+            IsStreamConnected = true;
+            RfcommConnected?.Invoke(this, EventArgs.Empty);
+            _connectTcs?.TrySetResult(true);
+        }
+        else
+        {
+            var ex = new BluetoothException(BluetoothException.ErrorCodes.ConnectFailed,
+                "Failed to create streams for L2CAP channel");
+            BluetoothErrorAsync?.Invoke(this, ex);
+            _connectTcs?.TrySetException(ex);
+        }
+    }
+
+    private void OnL2CapChannelClosed(NSError? error)
+    {
+        IsStreamConnected = false;
+        CloseL2CapChannel();
+        Disconnected?.Invoke(this, error?.LocalizedDescription ?? "L2CAP channel closed");
+    }
+
+    private void OnInputStreamDataAvailable()
+    {
+        if (_inputStream == null) return;
+
+        var bytesRead = _inputStream.Read(_readBuffer, _readBuffer.Length);
+        if (bytesRead > 0)
+        {
+            var data = new byte[bytesRead];
+            Array.Copy(_readBuffer, data, bytesRead);
+            NewDataAvailable?.Invoke(this, data);
+        }
+        else if (bytesRead < 0)
+        {
+            // Error or EOF
+            OnL2CapChannelClosed(null);
+        }
+    }
+
     private sealed record DiscoveredDevice(string Identifier, string Name, CBPeripheral Peripheral, Guid[]? ServiceUuids);
 
     private sealed class CentralDelegate(IosBluetoothService service) : CBCentralManagerDelegate
@@ -387,5 +562,48 @@ public class IosBluetoothService : IBluetoothService
         public override void UpdatedCharacterteristicValue(CBPeripheral peripheral, CBCharacteristic characteristic,
             NSError error)
             => service.OnCharacteristicValueUpdated(characteristic, error);
+
+        public override void OpenL2CAPChannelCompleted(CBPeripheral peripheral, CBL2CAPChannel channel, NSError error)
+            => service.OnL2CapChannelOpened(channel, error);
+    }
+
+    private sealed class L2CapChannelDelegate : CBL2CAPChannelDelegate
+    {
+        private readonly IosBluetoothService _service;
+
+        public L2CapChannelDelegate(IosBluetoothService service)
+        {
+            _service = service;
+        }
+
+        public override void ChannelClosed(CBL2CAPChannel channel, NSError error)
+            => _service.OnL2CapChannelClosed(error);
+    }
+
+    private sealed class StreamDelegate : NSStreamDelegate
+    {
+        private readonly IosBluetoothService _service;
+        private readonly bool _isInput;
+
+        public StreamDelegate(IosBluetoothService service, bool isInput)
+        {
+            _service = service;
+            _isInput = isInput;
+        }
+
+        public override void HandleEvent(NSStream theStream, NSStreamEvent streamEvent)
+        {
+            switch (streamEvent)
+            {
+                case NSStreamEvent.HasBytesAvailable:
+                    if (_isInput)
+                        _service.OnInputStreamDataAvailable();
+                    break;
+                case NSStreamEvent.ErrorOccurred:
+                case NSStreamEvent.EndEncountered:
+                    _service.OnL2CapChannelClosed(theStream.StreamError);
+                    break;
+            }
+        }
     }
 }

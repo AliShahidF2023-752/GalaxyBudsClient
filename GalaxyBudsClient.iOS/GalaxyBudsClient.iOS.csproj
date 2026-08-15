@@ -9,6 +9,13 @@
     <ApplicationTitle>Galaxy Buds Manager</ApplicationTitle>
     <ApplicationId>me.timschneeberger.galaxybudsclient.ios</ApplicationId>
     <DefineConstants>$(DefineConstants);IOS</DefineConstants>
+    <BuildIpa>true</BuildIpa>
+    <ArchiveOnBuild>true</ArchiveOnBuild>
+    <EnableCodeSigning>false</EnableCodeSigning>
+    <RuntimeIdentifiers>ios-arm64</RuntimeIdentifiers>
+    <CodesignKey></CodesignKey>
+    <CodesignProvision></CodesignProvision>
+    <CodesignEntitlements>Entitlements.plist</CodesignEntitlements>
   </PropertyGroup>
 
   <ItemGroup>
