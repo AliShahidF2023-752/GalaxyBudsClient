@@ -16,5 +16,11 @@
   <true/>
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>Galaxy Buds Manager uses Bluetooth to discover and communicate with your Galaxy Buds.</string>
+  <key>NSBluetoothPeripheralUsageDescription</key>
+  <string>Galaxy Buds Manager uses Bluetooth to discover and communicate with your Galaxy Buds.</string>
+  <key>UIBackgroundModes</key>
+  <array>
+    <string>bluetooth-central</string>
+  </array>
 </dict>
 </plist>
