@@ -23,10 +23,10 @@ public class IosBluetoothService : IBluetoothService
     private static BluetoothException BuildUnsupportedException()
     {
         return new BluetoothException(
-            BluetoothException.ErrorCodes.Unknown,
-            "Galaxy Buds require Bluetooth Classic RFCOMM/SPP for protocol traffic. " +
-            "iOS app sandbox APIs still restrict direct RFCOMM/SPP access to MFi External Accessory integrations, " +
-            "so non-MFi Galaxy Buds cannot be connected from this iOS build.");
+            BluetoothException.ErrorCodes.UnsupportedDevice,
+            "The iOS Bluetooth backend in this app is not implemented for Galaxy Buds protocol transport yet. " +
+            "CoreBluetooth BR/EDR+GATT support and transport bridging require accessory/profile-specific integration " +
+            "that is not mapped to this raw message backend in the current iOS build.");
     }
 
     public async Task ConnectAsync(string macAddress, string serviceUuid, CancellationToken cancelToken)
