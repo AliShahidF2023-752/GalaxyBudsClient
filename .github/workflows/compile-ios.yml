@@ -33,9 +33,9 @@ jobs:
     - name: Restore workloads
       run: dotnet workload restore GalaxyBudsClient.iOS/GalaxyBudsClient.iOS.csproj
     - name: Restore dependencies
-      run: dotnet restore --configfile GalaxyBudsClient/nuget.config GalaxyBudsClient.iOS/GalaxyBudsClient.iOS.csproj
+      run: dotnet restore --configfile GalaxyBudsClient/nuget.config GalaxyBudsClient.iOS/GalaxyBudsClient.iOS.csproj -p:IsIos=true
     - name: Build iOS arm64 IPA
-      run: dotnet publish -f net10.0-ios -r ios-arm64 -o bin_ios -c Release -p:BuildIpa=true -p:ArchiveOnBuild=true -p:EnableCodeSigning=false --no-restore GalaxyBudsClient.iOS/GalaxyBudsClient.iOS.csproj
+      run: dotnet publish -f net10.0-ios -r ios-arm64 -o bin_ios -c Release -p:BuildIpa=true -p:ArchiveOnBuild=true -p:EnableCodeSigning=false -p:IsIos=true --no-restore GalaxyBudsClient.iOS/GalaxyBudsClient.iOS.csproj
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v6
